@@ -420,6 +420,9 @@ impl<'db, 'ast> PlaceLoadResolution<'db, 'ast> {
             let forwards_to_global = is_lexical_enclosing_scope
                 && enclosing_place
                     .is_some_and(|place| place.as_symbol().is_some_and(Symbol::is_global));
+            let forwards_to_nonlocal = is_lexical_enclosing_scope
+                && enclosing_place
+                    .is_some_and(|place| place.as_symbol().is_some_and(Symbol::is_nonlocal));
             let root_place_was_reassigned = || {
                 enclosing_place_table
                     .parents(place_expr)
@@ -454,6 +457,10 @@ impl<'db, 'ast> PlaceLoadResolution<'db, 'ast> {
                                 )),
                                 None,
                             );
+                        }
+
+                        if forwards_to_nonlocal {
+                            self.crosses_scope_declaration = true;
                         }
 
                         return (
@@ -1141,5 +1148,108 @@ impl PlaceLoadConstraints {
     /// Returns the constraints activated by the sources that were requested.
     fn into_constraints(self) -> Vec<(FileScopeId, ConstraintKey)> {
         self.constraint_keys
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::tests::TestDbBuilder;
+    use ruff_db::files::system_path_to_file;
+    use ruff_db::parsed::parsed_module;
+    use ty_python_core::{ProgramFile, semantic_index};
+
+    fn resolve_class_body_load_crosses_scope_declaration(source: &str) -> anyhow::Result<bool> {
+        let db = TestDbBuilder::new()
+            .with_file("/src/test.py", source)
+            .build()?;
+        let file = system_path_to_file(&db, "/src/test.py").unwrap();
+        let program_file = ProgramFile::new(&db, file, db.program_environment().program(&db));
+        let module = parsed_module(&db, program_file.python_file(&db)).load(&db);
+        let index = semantic_index(&db, program_file);
+
+        let outer = module.suite()[0].as_function_def_stmt().unwrap();
+        let inner = outer
+            .body
+            .iter()
+            .find_map(|stmt| stmt.as_function_def_stmt())
+            .unwrap();
+        let class_def = inner
+            .body
+            .iter()
+            .find_map(|stmt| stmt.as_class_def_stmt())
+            .unwrap();
+        let assign = class_def.body[0].as_assign_stmt().unwrap();
+        let load_expr = assign.value.as_name_expr().unwrap();
+        let expr_ref = ast::ExprRef::Name(load_expr);
+
+        let scope = index
+            .try_expression_scope_id(&ast::Expr::Name(load_expr.clone()))
+            .unwrap()
+            .to_scope_id(&db, program_file);
+
+        let mut resolution = resolve_place_load(
+            &db,
+            index,
+            scope,
+            PlaceExpr::from_expr_name(load_expr),
+            PlaceLoadMode::AtExpression(expr_ref),
+        );
+
+        // Step 1: local source in `class C` (unbound).
+        let Some(PlaceLoadResolutionStep::Source(local_source)) = resolution.next() else {
+            panic!("expected local source step");
+        };
+        assert!(matches!(
+            local_source.kind,
+            PlaceLoadSourceKind::Bindings(_)
+        ));
+        assert!(!resolution.crosses_scope_declaration);
+
+        // Step 2: enclosing snapshot source from `inner`.
+        let Some(PlaceLoadResolutionStep::Source(enclosing_source)) = resolution.next() else {
+            panic!("expected enclosing snapshot source step");
+        };
+        assert!(matches!(
+            enclosing_source.kind,
+            PlaceLoadSourceKind::Bindings(_)
+        ));
+
+        Ok(resolution.crosses_scope_declaration)
+    }
+
+    #[test]
+    fn eager_snapshot_records_enclosing_nonlocal_declaration() -> anyhow::Result<()> {
+        let crosses = resolve_class_body_load_crosses_scope_declaration(
+            r#"
+def outer():
+    x = 1
+
+    def inner():
+        nonlocal x
+        x = 2
+
+        class C:
+            y = x
+"#,
+        )?;
+        assert!(crosses);
+        Ok(())
+    }
+
+    #[test]
+    fn eager_snapshot_without_scope_declaration_does_not_record_crossing() -> anyhow::Result<()> {
+        let crosses = resolve_class_body_load_crosses_scope_declaration(
+            r#"
+def outer():
+    def inner():
+        x = 2
+
+        class C:
+            y = x
+"#,
+        )?;
+        assert!(!crosses);
+        Ok(())
     }
 }
