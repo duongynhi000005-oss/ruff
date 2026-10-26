@@ -561,3 +561,28 @@ from typing import TypeForm
 
 string_form: TypeForm[str] = str
 ```
+
+## Default argument with `TypeForm` value type
+
+A container or callable with a `TypeForm` value type shouldn't treat non-type expressions passed
+as default arguments as invalid type expressions.
+
+```py
+from typing_extensions import TypeForm
+
+MISSING = object()
+
+def lookup(hints: dict[str, TypeForm[object]]) -> object:
+    return hints.get("return", MISSING)
+```
+
+```py
+from enum import Enum
+from typing_extensions import TypeForm
+
+class Sentinel(Enum):
+    OPEN = "open"
+
+def first(forms: list[TypeForm[object]]) -> TypeForm[object] | Sentinel:
+    return next(iter(forms), Sentinel.OPEN)
+```

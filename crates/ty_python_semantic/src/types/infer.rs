@@ -845,6 +845,8 @@ enum TypeContextKind {
 pub(crate) struct TypeContext<'db> {
     pub(crate) annotation: Option<Type<'db>>,
     kind: TypeContextKind,
+    pub(crate) raw_parameter_type: Option<Type<'db>>,
+    pub(crate) is_overload_candidate: bool,
 }
 
 impl<'db> TypeContext<'db> {
@@ -852,6 +854,8 @@ impl<'db> TypeContext<'db> {
         Self {
             annotation,
             kind: TypeContextKind::Declared,
+            raw_parameter_type: None,
+            is_overload_candidate: false,
         }
     }
 
@@ -859,11 +863,31 @@ impl<'db> TypeContext<'db> {
         Self {
             annotation: Some(annotation),
             kind: TypeContextKind::Validity,
+            raw_parameter_type: None,
+            is_overload_candidate: false,
+        }
+    }
+
+    pub(crate) fn as_overload_candidate(self) -> Self {
+        Self {
+            is_overload_candidate: true,
+            ..self
+        }
+    }
+
+    pub(crate) fn with_raw_parameter_type(self, raw_parameter_type: Type<'db>) -> Self {
+        Self {
+            raw_parameter_type: Some(raw_parameter_type),
+            ..self
         }
     }
 
     pub(crate) fn is_declared(self) -> bool {
         matches!(self.kind, TypeContextKind::Declared)
+    }
+
+    pub(crate) fn is_overload_candidate(self) -> bool {
+        self.is_overload_candidate
     }
 
     /// If the type annotation is a specialized instance of the given `KnownClass`, returns the

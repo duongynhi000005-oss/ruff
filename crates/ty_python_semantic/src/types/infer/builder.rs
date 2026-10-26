@@ -6540,7 +6540,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
                         let tcx = argument_tcx
                             .map(ArgumentTypeContext::type_context)
-                            .unwrap_or_default();
+                            .unwrap_or_default()
+                            .as_overload_candidate();
 
                         let mut speculative_builder = self.speculate();
                         let inferred_ty = infer_argument_ty(
@@ -6797,7 +6798,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         tcx: TypeContext<'db>,
     ) -> Type<'db> {
         if let Some(target) = tcx.annotation
-            && let Some(ty) = self.infer_type_form_contextual_expression(expression, target)
+            && let Some(ty) = self.infer_type_form_contextual_expression(expression, target, tcx)
         {
             self.store_expression_type(expression, ty);
             return ty;

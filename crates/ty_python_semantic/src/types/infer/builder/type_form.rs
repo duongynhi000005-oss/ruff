@@ -17,6 +17,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         &mut self,
         expression: &ast::Expr,
         target: Type<'db>,
+        tcx: TypeContext<'db>,
     ) -> Option<Type<'db>> {
         let db = self.db();
         let env = self.program_environment();
@@ -62,12 +63,40 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             if contextual_ty.is_assignable_to(db, env, target) {
                 return None;
             }
+
+            if !tcx.is_declared()
+                || tcx.is_overload_candidate()
+                || tcx
+                    .raw_parameter_type
+                    .is_some_and(|raw| !self.type_contains_type_form(raw))
+            {
+                return None;
+            }
         }
 
         Some(TypeFormType::from_type_expression(
             self.db(),
             self.infer_type_expression_no_store(expression),
         ))
+    }
+
+    fn type_contains_type_form(&self, ty: Type<'db>) -> bool {
+        match ty.resolve_type_alias(self.db()) {
+            Type::TypeForm(_) => true,
+            Type::Union(union) => union
+                .elements(self.db())
+                .iter()
+                .any(|element| self.type_contains_type_form(*element)),
+            Type::Intersection(intersection) => intersection
+                .iter_positive(self.db())
+                .any(|element| self.type_contains_type_form(element)),
+            Type::TypeVar(typevar) => {
+                let bound =
+                    typevar.require_bound_or_constraints(self.db(), self.program_environment());
+                self.type_contains_type_form(bound.as_type(self.db(), self.program_environment()))
+            }
+            _ => false,
+        }
     }
 
     fn contains_type_form_value(&self, expression: &ast::Expr, ty: Type<'db>) -> bool {

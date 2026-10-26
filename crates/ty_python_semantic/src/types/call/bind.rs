@@ -7919,7 +7919,10 @@ impl<'db> ArgumentTypeContext<'db> {
     /// Returns the type context used for inferring the argument expression.
     pub(crate) fn type_context(self) -> TypeContext<'db> {
         match self {
-            Self::Standard { context, .. } => context,
+            Self::Standard {
+                raw_parameter_type,
+                context,
+            } => context.with_raw_parameter_type(raw_parameter_type),
             Self::ParamSpec { declared_type, .. } => TypeContext::declared(Some(declared_type)),
         }
     }
