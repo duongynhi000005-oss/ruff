@@ -441,4 +441,44 @@ class Foo(TypedDict):
     y: ClassVar
 ```
 
+## Inherited `ClassVar` assigned in `__init_subclass__` or `@classmethod`
+
+When a subclass assigns to `cls.<attr>` in `__init_subclass__` or a `@classmethod` without a new
+annotation, an inherited `ClassVar` declaration from a base class continues to govern the attribute's
+public type and `ClassVar` qualifier on that subclass and its descendants:
+
+```py
+from typing import Any, ClassVar
+
+class X:
+    x: int = 1
+
+class Base:
+    attr: ClassVar[type[X]]
+
+class Sub(Base):
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        dynamic = type("Dynamic", (X,), {})
+        cls.attr = dynamic
+        cls.attr = 123  # error: [invalid-assignment]
+
+class SubWithClassMethod(Base):
+    @classmethod
+    def setup(cls) -> None:
+        dynamic = type("Dynamic", (X,), {})
+        cls.attr = dynamic
+
+class Leaf(Sub):
+    pass
+
+reveal_type(Sub.attr)  # revealed: type[X]
+reveal_type(SubWithClassMethod.attr)  # revealed: type[X]
+reveal_type(Leaf.attr)  # revealed: type[X]
+reveal_type(Leaf.attr.x)  # revealed: int
+
+Sub().attr = X  # error: [invalid-attribute-access]
+Leaf().attr = X  # error: [invalid-attribute-access]
+```
+
 [`typing.classvar`]: https://docs.python.org/3/library/typing.html#typing.ClassVar

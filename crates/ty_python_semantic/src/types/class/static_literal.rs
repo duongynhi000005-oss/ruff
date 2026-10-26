@@ -1658,7 +1658,29 @@ impl<'db> StaticClassLiteral<'db> {
                 return Member::definitely_declared(synthesized_member);
             }
             // The symbol was not found in the class scope. It might still be implicitly defined in `@classmethod`s.
-            return self.implicit_attribute(db, name, MethodDecorator::ClassMethod);
+            let mut member = self.implicit_attribute(db, name, MethodDecorator::ClassMethod);
+            if let Place::Defined(ref mut place) = member.inner.place
+                && place.origin == TypeOrigin::Inferred
+                && let Some(inherited) = MroLookup::new(
+                    db,
+                    env,
+                    self.identity_specialization(db).iter_mro(db).skip(1),
+                )
+                .class_body_declaration(name)
+            {
+                if name != "__hash__"
+                    && let Place::Defined(declared) = inherited.member.place
+                {
+                    *place = DefinedPlace {
+                        ty: declared.ty,
+                        origin: declared.origin,
+                        public_type_policy: declared.public_type_policy,
+                        ..*place
+                    };
+                }
+                member.inner.qualifiers = inherited.member.qualifiers;
+            }
+            return member;
         }
 
         // For dataclass-like classes, `KW_ONLY` sentinel fields are not real
