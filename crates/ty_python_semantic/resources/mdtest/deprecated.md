@@ -2507,3 +2507,53 @@ def check(value: First[int] | Second):
     # error: [deprecated] "Possible use of deprecated methods: `First.__call__`, `Second.__call__`"
     value(1)
 ```
+
+## Descriptor `__get__` access
+
+Attribute access on an instance invokes the descriptor protocol. If the resolved `__get__` method or
+overload is marked with `@deprecated`, the access produces a warning.
+
+```py
+from typing import overload
+from typing_extensions import deprecated
+
+class Descriptor:
+    @overload
+    def __get__(self, instance: None, owner: type[object]) -> int: ...
+    @overload
+    @deprecated("instance access is deprecated")
+    def __get__(self, instance: object, owner: type[object]) -> int: ...
+    def __get__(self, instance: object | None, owner: type[object]) -> int:
+        return 0
+
+class C:
+    attr = Descriptor()
+
+Descriptor().__get__(C(), C)  # error: [deprecated] "instance access is deprecated"
+C().attr  # error: [deprecated] "instance access is deprecated"
+C.attr
+```
+
+Accessing a descriptor with a deprecated non-overloaded `__get__` method also warns:
+
+```py
+from typing_extensions import deprecated
+
+class DeprecatedGet:
+    @deprecated("get is deprecated")
+    def __get__(self, instance: object, owner: type[object]) -> int:
+        return 0
+
+class D:
+    attr = DeprecatedGet()
+
+D().attr  # error: [deprecated] "get is deprecated"
+```
+
+Accessing a descriptor via `super()` also reports the deprecation:
+
+```py
+class Sub(C):
+    def test(self):
+        super().attr  # error: [deprecated] "instance access is deprecated"
+```

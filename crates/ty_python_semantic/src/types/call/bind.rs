@@ -4635,7 +4635,7 @@ impl<'db> CallableBinding<'db> {
     /// Returns the deprecated implementation, taking precedence over any deprecated overloads.
     /// Otherwise, returns deprecated overloads selected by this call, using their original source
     /// indexes to preserve their identities after receiver compatibility filtering.
-    fn deprecated_functions(
+    pub(crate) fn deprecated_functions(
         &self,
         db: &'db dyn Db,
     ) -> impl Iterator<Item = OverloadLiteral<'db>> + Clone {

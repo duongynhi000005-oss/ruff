@@ -368,6 +368,13 @@ impl<'db> CallError<'db> {
         self.1.return_type(db, env)
     }
 
+    pub(crate) fn deprecated_functions(
+        &self,
+        db: &'db dyn Db,
+    ) -> impl Iterator<Item = (&CallableBinding<'db>, OverloadLiteral<'db>)> {
+        self.1.deprecated_functions(db)
+    }
+
     /// Returns `Some(property)` if the call error was caused by an attempt to read a property
     /// that has no getter, and `None` otherwise.
     pub(crate) fn as_attempt_to_get_property_with_no_getter(
