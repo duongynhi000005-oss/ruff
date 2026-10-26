@@ -941,17 +941,22 @@ impl<'db> BoundSuperType<'db> {
         attribute: PlaceAndQualifiers<'db>,
     ) -> Option<MemberLookupResult<'db>> {
         let (instance, owner) = self.owner(db).descriptor_binding(db, env)?;
-        let (member, _, descriptor_error) =
+        let (member, _, descriptor_error, descriptor_deprecations) =
             Type::try_call_dunder_get_on_attribute(db, env, attribute, instance, owner);
+        let property_deprecations = instance
+            .and_then(|_| attribute.place.ignore_possibly_undefined())
+            .and_then(|ty| ty.property_deprecations(db))
+            // `super` delegates reads to the owner's descriptors, but not writes or deletions.
+            .map(|properties| properties.getters_only(db));
         Some(member_lookup_result(
             db,
             member,
             descriptor_error.map(MemberLookupErrorKind::DescriptorGet),
-            instance
-                .and_then(|_| attribute.place.ignore_possibly_undefined())
-                .and_then(|ty| ty.property_deprecations(db))
-                // `super` delegates reads to the owner's descriptors, but not writes or deletions.
-                .map(|properties| properties.getters_only(db)),
+            crate::types::union_deprecated_properties(
+                db,
+                descriptor_deprecations,
+                property_deprecations,
+            ),
         ))
     }
 

@@ -851,11 +851,12 @@ impl<'db> DescriptorGetCallContext<'db> {
     }
 }
 
-/// The type and descriptor kind produced by an implicit `__get__` call.
+/// The type, descriptor kind, and deprecated accessors produced by an implicit `__get__` call.
 #[derive(Clone, Debug, Copy, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
 pub(crate) struct DescriptorGetResult<'db> {
     pub(crate) return_type: Type<'db>,
     kind: AttributeKind,
+    deprecations: Option<PropertyDeprecations<'db>>,
 }
 
 /// A failed implicit descriptor call together with its recovery value.
@@ -875,9 +876,14 @@ impl<'db> DescriptorGetError<'db> {
 fn descriptor_get_result<'db>(
     return_type: Type<'db>,
     kind: AttributeKind,
+    deprecations: Option<PropertyDeprecations<'db>>,
     error: Option<DescriptorGetCallContext<'db>>,
 ) -> Result<Option<DescriptorGetResult<'db>>, DescriptorGetError<'db>> {
-    let result = DescriptorGetResult { return_type, kind };
+    let result = DescriptorGetResult {
+        return_type,
+        kind,
+        deprecations,
+    };
     match error {
         Some(context) => Err(DescriptorGetError {
             fallback: result,
@@ -5068,12 +5074,14 @@ impl<'db> Type<'db> {
                 return Ok(Some(DescriptorGetResult {
                     return_type: dynamic,
                     kind: AttributeKind::DataDescriptor,
+                    deprecations: None,
                 }));
             }
 
             if let Some(union) = ty.as_union_like(db) {
                 let mut return_types = UnionBuilder::new(db, env);
                 let mut error = None;
+                let mut deprecations = None;
                 let mut any_descriptor = false;
                 let mut all_data_descriptors = true;
 
@@ -5084,9 +5092,16 @@ impl<'db> Type<'db> {
                             error = error.or(Some(failure.context));
                             Some(failure.fallback())
                         });
-                    if let Some(DescriptorGetResult { return_type, kind }) = result {
+                    if let Some(DescriptorGetResult {
+                        return_type,
+                        kind,
+                        deprecations: alt_deprecations,
+                    }) = result
+                    {
                         any_descriptor = true;
                         all_data_descriptors &= kind.is_data();
+                        deprecations =
+                            union_deprecated_properties(db, deprecations, alt_deprecations);
                         return_types = return_types.add(return_type);
                     } else {
                         all_data_descriptors = false;
@@ -5102,6 +5117,7 @@ impl<'db> Type<'db> {
                         } else {
                             AttributeKind::NormalOrNonDataDescriptor
                         },
+                        deprecations,
                         error,
                     )
                 } else {
@@ -5149,26 +5165,41 @@ impl<'db> Type<'db> {
             } else {
                 AttributeKind::NormalOrNonDataDescriptor
             };
-            let (return_type, error) = match descr_get.try_call(
+            let (return_type, deprecated_getters, error) = match descr_get.try_call(
                 db,
                 env,
                 &CallArguments::positional([ty, instance_ty, owner]),
             ) {
-                Ok(bindings) => (bindings.return_type(db, env), None),
+                Ok(bindings) => (
+                    bindings.return_type(db, env),
+                    bindings
+                        .deprecated_functions(db)
+                        .map(|(_, function)| function)
+                        .collect::<Box<[_]>>(),
+                    None,
+                ),
                 Err(error) => (
                     error.return_type(db, env),
+                    error
+                        .1
+                        .deprecated_functions(db)
+                        .map(|(_, function)| function)
+                        .collect::<Box<[_]>>(),
                     Some(DescriptorGetCallContext::new(
                         db, ty, descr_get, instance, owner,
                     )),
                 ),
             };
+            let deprecations = (!deprecated_getters.is_empty()).then(|| {
+                PropertyDeprecations::new(db, deprecated_getters, Box::default(), Box::default())
+            });
             let return_type = if descr_get_boundness == Definedness::AlwaysDefined {
                 return_type
             } else {
                 UnionType::from_two_elements(db, env, return_type, ty)
             };
 
-            descriptor_get_result(return_type, kind, error)
+            descriptor_get_result(return_type, kind, deprecations, error)
         }
 
         tracing::trace!(
@@ -5194,6 +5225,7 @@ impl<'db> Type<'db> {
             return Ok(Some(DescriptorGetResult {
                 return_type,
                 kind: AttributeKind::NormalOrNonDataDescriptor,
+                deprecations: None,
             }));
         }
 
@@ -5203,6 +5235,7 @@ impl<'db> Type<'db> {
             return Ok(Some(DescriptorGetResult {
                 return_type: instance.map_or(self, |_| descriptor.value_type(db)),
                 kind: AttributeKind::DataDescriptor,
+                deprecations: None,
             }));
         }
 
@@ -5222,6 +5255,7 @@ impl<'db> Type<'db> {
         PlaceAndQualifiers<'db>,
         AttributeKind,
         Option<DescriptorGetCallContext<'db>>,
+        Option<PropertyDeprecations<'db>>,
     ) {
         if let PlaceAndQualifiers {
             place:
@@ -5252,7 +5286,7 @@ impl<'db> Type<'db> {
             );
         }
 
-        let (member, kind, error) = match attribute {
+        let (member, kind, error, deprecations) = match attribute {
             // A directly dynamic attribute could be a data descriptor even though we cannot see
             // its methods. Preserve that uncertainty, along with the existing bottom and cycle
             // behavior, without performing member lookups that cannot add information.
@@ -5263,7 +5297,7 @@ impl<'db> Type<'db> {
                         ..
                     }),
                 qualifiers: _,
-            } => (attribute, AttributeKind::DataDescriptor, None),
+            } => (attribute, AttributeKind::DataDescriptor, None, None),
 
             PlaceAndQualifiers {
                 place:
@@ -5278,6 +5312,7 @@ impl<'db> Type<'db> {
             } => {
                 let mut all_data_descriptors = true;
                 let mut error = None;
+                let mut deprecations = None;
                 let place = union
                     .map_with_boundness(db, env, |elem| {
                         let result = elem
@@ -5287,8 +5322,17 @@ impl<'db> Type<'db> {
                                 Some(failure.fallback())
                             });
                         let ty = match result {
-                            Some(DescriptorGetResult { return_type, kind }) => {
+                            Some(DescriptorGetResult {
+                                return_type,
+                                kind,
+                                deprecations: elem_deprecations,
+                            }) => {
                                 all_data_descriptors &= kind.is_data();
+                                deprecations = union_deprecated_properties(
+                                    db,
+                                    deprecations,
+                                    elem_deprecations,
+                                );
                                 return_type
                             }
                             None => {
@@ -5313,7 +5357,7 @@ impl<'db> Type<'db> {
                     AttributeKind::NormalOrNonDataDescriptor
                 };
 
-                (place, kind, error)
+                (place, kind, error, deprecations)
             }
 
             attribute @ PlaceAndQualifiers {
@@ -5328,18 +5372,30 @@ impl<'db> Type<'db> {
                 qualifiers,
             } => {
                 let mut error = None;
+                let mut deprecations: Option<PropertyDeprecations<'db>> = None;
+                let mut all_deprecated = true;
                 let place = if intersection.positive(db).is_empty() {
+                    all_deprecated = false;
                     attribute
                 } else {
                     intersection
                         .map_with_boundness(db, env, |elem| {
-                            let ty = elem
+                            let result = elem
                                 .try_call_dunder_get(db, env, instance, owner)
                                 .unwrap_or_else(|failure| {
                                     error = error.or(Some(failure.context));
                                     Some(failure.fallback())
-                                })
-                                .map_or(*elem, |result| result.return_type);
+                                });
+                            if let Some(deprecated) = result.and_then(|result| result.deprecations)
+                            {
+                                deprecations =
+                                    Some(deprecations.map_or(deprecated, |deprecations| {
+                                        deprecations.intersection(db, deprecated)
+                                    }));
+                            } else {
+                                all_deprecated = false;
+                            }
+                            let ty = result.map_or(*elem, |result| result.return_type);
                             Place::Defined(DefinedPlace {
                                 ty,
                                 origin,
@@ -5356,6 +5412,7 @@ impl<'db> Type<'db> {
                     // descriptor return type into an unsound intersection.
                     AttributeKind::NormalOrNonDataDescriptor,
                     error,
+                    deprecations.filter(|_| all_deprecated),
                 )
             }
 
@@ -5377,7 +5434,12 @@ impl<'db> Type<'db> {
                         error = Some(failure.context);
                         Some(failure.fallback())
                     });
-                if let Some(DescriptorGetResult { return_type, kind }) = result {
+                if let Some(DescriptorGetResult {
+                    return_type,
+                    kind,
+                    deprecations,
+                }) = result
+                {
                     (
                         Place::Defined(DefinedPlace {
                             ty: return_type,
@@ -5389,16 +5451,27 @@ impl<'db> Type<'db> {
                         .into(),
                         kind,
                         error,
+                        deprecations,
                     )
                 } else {
-                    (attribute, AttributeKind::NormalOrNonDataDescriptor, None)
+                    (
+                        attribute,
+                        AttributeKind::NormalOrNonDataDescriptor,
+                        None,
+                        None,
+                    )
                 }
             }
 
-            _ => (attribute, AttributeKind::NormalOrNonDataDescriptor, None),
+            _ => (
+                attribute,
+                AttributeKind::NormalOrNonDataDescriptor,
+                None,
+                None,
+            ),
         };
 
-        (member, kind, error)
+        (member, kind, error, deprecations)
     }
 
     /// Returns whether this type is a data descriptor, i.e. defines `__set__` or `__delete__`.
@@ -5576,10 +5649,15 @@ impl<'db> Type<'db> {
             },
             meta_attr_kind,
             meta_attr_error,
+            meta_descriptor_deprecations,
         ) = Self::try_call_dunder_get_on_attribute(db, env, meta_attr_plain, Some(receiver), owner);
 
         let meta_attr_error = meta_attr_error.map(MemberLookupErrorKind::DescriptorGet);
-        let meta_properties = meta_attr_ty.and_then(|ty| ty.property_deprecations(db));
+        let meta_properties = union_deprecated_properties(
+            db,
+            meta_descriptor_deprecations,
+            meta_attr_ty.and_then(|ty| ty.property_deprecations(db)),
+        );
         let fallback_error = fallback.err().map(|error| error.kind(db));
         let fallback_member = fallback.unwrap_or_else(|error| error.fallback_member(db));
         let fallback_properties = fallback_member.deprecated_properties(db);
@@ -6654,7 +6732,7 @@ impl<'db> Type<'db> {
                     let class_attr_plain = class_attr_plain
                         .map_type(|ty| ty.bind_self_typevars(db, env, self_instance));
 
-                    let (class_attr_fallback, _, class_attr_error) =
+                    let (class_attr_fallback, _, class_attr_error, class_attr_deprecations) =
                         Type::try_call_dunder_get_on_attribute(
                             db,
                             env,
@@ -6672,7 +6750,7 @@ impl<'db> Type<'db> {
                             db,
                             class_attr_fallback,
                             class_attr_error.map(MemberLookupErrorKind::DescriptorGet),
-                            None,
+                            class_attr_deprecations,
                         ),
                         InstanceFallbackShadowsNonDataDescriptor::Yes,
                     );

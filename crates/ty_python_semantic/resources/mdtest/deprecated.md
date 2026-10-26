@@ -1256,6 +1256,57 @@ class C:
 C().value
 ```
 
+## Descriptor `__get__`
+
+Attribute access on a descriptor invokes its `__get__` method and reports the deprecation of the
+selected overload or implementation.
+
+```py
+from typing import Any, overload
+from typing_extensions import Self, deprecated
+
+class InstanceDeprecatedDescriptor:
+    @overload
+    def __get__(self, instance: None, owner: type[Any]) -> Self: ...
+    @overload
+    @deprecated("instance access is deprecated")
+    def __get__(self, instance: object, owner: type[Any]) -> int: ...
+    def __get__(self, instance: object, owner: type[Any]) -> Self | int:
+        return self if instance is None else 0
+
+class ClassDeprecatedDescriptor:
+    @overload
+    @deprecated("class access is deprecated")
+    def __get__(self, instance: None, owner: type[Any]) -> Self: ...
+    @overload
+    def __get__(self, instance: object, owner: type[Any]) -> int: ...
+    def __get__(self, instance: object, owner: type[Any]) -> Self | int:
+        return self if instance is None else 0
+
+class C:
+    inst_attr = InstanceDeprecatedDescriptor()
+    cls_attr = ClassDeprecatedDescriptor()
+    def __delattr__(self, name: str) -> None: ...
+
+C.inst_attr
+# error: [deprecated] "The overload of `__get__` is deprecated: instance access is deprecated"
+C().inst_attr
+del C().inst_attr
+
+# error: [deprecated] "The overload of `__get__` is deprecated: class access is deprecated"
+C.cls_attr
+C().cls_attr
+
+class Child(C):
+    def check(self) -> None:
+        # error: [deprecated] "The overload of `__get__` is deprecated: instance access is deprecated"
+        super().inst_attr
+        super(Child, Child).inst_attr
+        # error: [deprecated] "The overload of `__get__` is deprecated: class access is deprecated"
+        super(Child, Child).cls_attr
+        super().cls_attr
+```
+
 ## Setter deprecations and contextual inference
 
 The ordinary attribute supplies `int` as the lambda's parameter type. Checking the other member's
