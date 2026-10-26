@@ -1384,7 +1384,6 @@ pub(crate) fn place_by_id<'db>(
             qualifiers,
         } => {
             let bindings = all_considered_bindings();
-            let boundness_analysis = bindings.boundness_analysis();
             let inferred =
                 place_from_bindings_impl(db, &env, bindings, requires_explicit_reexport, None);
 
@@ -1412,11 +1411,7 @@ pub(crate) fn place_by_id<'db>(
                 }) => Place::Defined(DefinedPlace {
                     ty: UnionType::from_two_elements(db, &env, inferred_ty, declared_ty),
                     origin,
-                    definedness: if boundness_analysis == BoundnessAnalysis::AssumeBound {
-                        Definedness::AlwaysDefined
-                    } else {
-                        boundness
-                    },
+                    definedness: boundness,
                     public_type_policy: PublicTypePolicy::Raw,
                     provenance: inferred_provenance.or(declared_provenance),
                 }),
@@ -1430,19 +1425,9 @@ pub(crate) fn place_by_id<'db>(
             qualifiers,
         } => {
             let bindings = all_considered_bindings();
-            let boundness_analysis = bindings.boundness_analysis();
             let mut inferred =
                 place_from_bindings_impl(db, &env, bindings, requires_explicit_reexport, None)
                     .place;
-
-            if boundness_analysis == BoundnessAnalysis::AssumeBound {
-                if let Place::Defined(defined) = inferred {
-                    if defined.definedness == Definedness::PossiblyUndefined {
-                        inferred =
-                            Place::Defined(defined.with_definedness(Definedness::AlwaysDefined));
-                    }
-                }
-            }
 
             // `__slots__` is a symbol with special behavior in Python's runtime. It can be
             // modified externally, but those changes do not take effect. We therefore issue
@@ -2028,7 +2013,14 @@ fn place_from_bindings_impl<'db>(
         };
 
         let boundness = match boundness_analysis {
-            BoundnessAnalysis::AssumeBound => Definedness::AlwaysDefined,
+            BoundnessAnalysis::AssumeBound => match unbound_visibility() {
+                Some(Truthiness::AlwaysFalse | Truthiness::Uninhabited) | None => {
+                    Definedness::AlwaysDefined
+                }
+                Some(Truthiness::AlwaysTrue | Truthiness::Ambiguous) => {
+                    Definedness::PossiblyUndefined
+                }
+            },
             BoundnessAnalysis::BasedOnUnboundVisibility => match unbound_visibility() {
                 Some(Truthiness::AlwaysTrue) if only_non_shadowing_bindings => {
                     // Loop header and nested binding definitions don't shadow prior bindings, so

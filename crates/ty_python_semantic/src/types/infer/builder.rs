@@ -10750,6 +10750,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let mut place = PlaceAndQualifiers::from(Place::Undefined);
         let mut failure = None;
         let mut checked_deprecated = false;
+        let mut assumes_bound_after_fallback = false;
 
         while let Some(step) = resolution.next() {
             match step {
@@ -10765,14 +10766,30 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         }
                         checked_deprecated = true;
                     }
-                    let narrowing_constraints = resolution.narrowing_constraints_for(&source);
-                    place = place.or_fall_back_to(self.db(), env, || {
-                        self.infer_place_load_source(
-                            resolution.place_expr(),
-                            source,
-                            narrowing_constraints,
+                    let source_assumes_bound = source.is_class_body_global_fallback()
+                        || matches!(
+                            &source.kind,
+                            PlaceLoadSourceKind::Bindings(bindings)
+                                if bindings.boundness_analysis()
+                                    == ty_python_core::BoundnessAnalysis::AssumeBound
                         )
-                    });
+                        || matches!(
+                            source.kind,
+                            PlaceLoadSourceKind::DefinitionsFromOwningScope { .. }
+                                | PlaceLoadSourceKind::Implicit(
+                                    ImplicitPlaceLoad::ExplicitGlobalSymbol { .. }
+                                )
+                        );
+                    let narrowing_constraints = resolution.narrowing_constraints_for(&source);
+                    let source_place = self.infer_place_load_source(
+                        resolution.place_expr(),
+                        source,
+                        narrowing_constraints,
+                    );
+                    if source_assumes_bound && matches!(source_place.place, Place::Defined(_)) {
+                        assumes_bound_after_fallback = true;
+                    }
+                    place = place.or_fall_back_to(self.db(), env, || source_place);
                     if place.place.is_definitely_bound() {
                         break;
                     }
@@ -10788,6 +10805,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     break;
                 }
             }
+        }
+
+        // Compatibility policy: ty historically treats possibly-bound enclosing, deferred, or
+        // module-global definitions as definitely bound. Deferring this promotion until after
+        // the resolution loop lets implicit globals and builtins supply fallback types when a
+        // module-global definition is only possibly defined.
+        if assumes_bound_after_fallback && let Place::Defined(defined) = place.place {
+            place.place = Place::Defined(defined.with_definedness(Definedness::AlwaysDefined));
         }
 
         if !checked_deprecated && let Some(ty) = place.place.ignore_possibly_undefined() {
@@ -10815,27 +10840,16 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     ) -> PlaceAndQualifiers<'db> {
         let db = self.db();
         let env = self.program_environment();
-        let is_class_body_global_fallback = source.is_class_body_global_fallback();
 
         let place = match source.kind {
-            PlaceLoadSourceKind::Bindings(bindings) => {
-                let mut place = place_from_bindings_with_reachability_cache(
-                    db,
-                    env,
-                    bindings,
-                    self.reachability_cache(),
-                )
-                .place;
-
-                // Compatibility policy: ty historically treats a possibly-bound module snapshot
-                // reached through a class-body global fallback as definitely bound. At runtime,
-                // an unbound snapshot would continue to builtins or produce a name error.
-                if is_class_body_global_fallback && let Place::Defined(defined) = place {
-                    place = Place::Defined(defined.with_definedness(Definedness::AlwaysDefined));
-                }
-
-                place.into()
-            }
+            PlaceLoadSourceKind::Bindings(bindings) => place_from_bindings_with_reachability_cache(
+                db,
+                env,
+                bindings,
+                self.reachability_cache(),
+            )
+            .place
+            .into(),
             PlaceLoadSourceKind::DefinitionsFromOwningScope { scope, id } => place_by_id(
                 db,
                 scope,

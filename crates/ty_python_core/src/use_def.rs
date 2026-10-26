@@ -1154,9 +1154,20 @@ impl<'db> UseDefMap<'db> {
             ScopedPlaceId::Symbol(symbol) => &self.symbol_states[symbol],
             ScopedPlaceId::Member(member) => &self.extra().member_states[member],
         };
+        let end_of_scope_bindings = &self.interned_bindings[state.end_of_scope.bindings_id()];
+        let initial_unbound = end_of_scope_bindings
+            .first()
+            .filter(|binding| binding.binding().is_unbound())
+            .map(|binding| {
+                if self.end_of_scope_reachability == ScopedReachabilityConstraintId::ALWAYS_FALSE {
+                    state.initial_reachability
+                } else {
+                    binding.reachability_constraint()
+                }
+            });
         let bindings = &self.interned_bindings[state.reachable.bindings_id()];
         BindingWithConstraintsIterator {
-            initial_unbound: Some(state.initial_reachability),
+            initial_unbound,
             ..self.bindings_iterator(bindings, BoundnessAnalysis::AssumeBound)
         }
     }

@@ -29,10 +29,19 @@ def flag() -> bool:
 if flag():
     abs = 1
     chr: int = 1
+else:
+    len = 1
+
+len = 1
+
+class C:
+    reveal_type(abs)  # revealed: Literal[1] | (def abs[_T](x: SupportsAbs[_T], /) -> _T)
+    abs = 2
+    reveal_type(len)  # revealed: Literal[1]
+    len = 2
 
 def _():
-    # TODO: Should ideally be `Literal[1] | (def abs(x: SupportsAbs[_T], /) -> _T)`
-    reveal_type(abs)  # revealed: Literal[1]
-    # TODO: Should ideally be `int | (def chr(i: SupportsIndex, /) -> str)`
-    reveal_type(chr)  # revealed: int
+    reveal_type(abs)  # revealed: Literal[1] | (def abs[_T](x: SupportsAbs[_T], /) -> _T)
+    reveal_type(chr)  # revealed: int | (def chr(i: SupportsIndex, /) -> str)
+    reveal_type(len)  # revealed: Literal[1]
 ```
