@@ -7953,6 +7953,106 @@ value: Literal["apple", "banana"] = "app<CURSOR>"
     }
 
     #[test]
+    fn string_literal_completions_attribute_assignment() {
+        let builder = completion_test_builder(
+            r#"
+from typing import Literal
+
+class C:
+    mode: Literal["read", "write"]
+
+C().mode = "<CURSOR>"
+"#,
+        );
+
+        assert_snapshot!(
+            builder.skip_keywords().skip_builtins().skip_auto_import().type_signatures().build().snapshot(),
+            @r#"
+        read :: Literal["read"]
+        write :: Literal["write"]
+        "#,
+        );
+    }
+
+    #[test]
+    fn string_literal_completions_attribute_assignment_instance_variable() {
+        let builder = completion_test_builder(
+            r#"
+from typing import Literal
+
+class C:
+    def __init__(self) -> None:
+        self.mode: Literal["read", "write"] = "read"
+
+c = C()
+c.mode = "<CURSOR>"
+"#,
+        );
+
+        assert_snapshot!(
+            builder.skip_keywords().skip_builtins().skip_auto_import().type_signatures().build().snapshot(),
+            @r#"
+        read :: Literal["read"]
+        write :: Literal["write"]
+        "#,
+        );
+    }
+
+    #[test]
+    fn string_literal_completions_attribute_assignment_property_setter() {
+        let builder = completion_test_builder(
+            r#"
+from typing import Literal
+
+class C:
+    @property
+    def mode(self) -> str:
+        return "read"
+
+    @mode.setter
+    def mode(self, value: Literal["read", "write"]) -> None: ...
+
+C().mode = "<CURSOR>"
+"#,
+        );
+
+        assert_snapshot!(
+            builder.skip_keywords().skip_builtins().skip_auto_import().type_signatures().build().snapshot(),
+            @r#"
+        read :: Literal["read"]
+        write :: Literal["write"]
+        "#,
+        );
+    }
+
+    #[test]
+    fn string_literal_completions_attribute_assignment_union_receiver() {
+        let builder = completion_test_builder(
+            r#"
+from typing import Literal
+
+class Reader:
+    mode: Literal["read", "read_write"]
+
+class Writer:
+    mode: Literal["write", "read_write"]
+
+def f(obj: Reader | Writer) -> None:
+    obj.mode = "<CURSOR>"
+"#,
+        );
+
+        assert_snapshot!(
+            builder.skip_keywords().skip_builtins().skip_auto_import().type_signatures().build().snapshot(),
+            @r#"
+        read :: Literal["read"]
+        read_write :: Literal["read_write"]
+        write :: Literal["write"]
+        "#,
+        );
+    }
+
+    #[test]
     fn string_literal_completions_nested_expected_type() {
         let builder = completion_test_builder(
             r#"

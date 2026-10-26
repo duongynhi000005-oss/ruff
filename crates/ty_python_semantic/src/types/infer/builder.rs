@@ -7122,7 +7122,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
     /// Whether this region's inference should record expected types for string-literal
     /// completions. They're only ever read for files open in the editor.
-    fn collects_expected_types(&self) -> bool {
+    pub(super) fn collects_expected_types(&self) -> bool {
         self.db().is_open_file(self.file())
     }
 
@@ -13006,7 +13006,10 @@ impl<'db, 'ast, 'infer> MultiInferenceGuard<'db, 'ast, 'infer> {
         tcx: TypeContext<'db>,
     ) -> Type<'db> {
         self.last_tcx = Some(tcx);
-        (self.infer_expr)(&mut builder.speculate_without_diagnostics(), tcx)
+        let mut speculative = builder.speculate_without_diagnostics();
+        let ty = (self.infer_expr)(&mut speculative, tcx);
+        builder.union_expected_types(&speculative.expected_types);
+        ty
     }
 
     fn last_tcx(&self) -> TypeContext<'db> {

@@ -297,12 +297,14 @@ impl<'db> AssignmentAttributeWriteEvaluator<'_, 'db, '_, '_> {
             } => {
                 let value_ty = self.infer_value(TypeContext::default(), emit_diagnostics);
                 let attribute = self.attribute;
+                let collects_expected_types = self.builder.collects_expected_types();
                 let mut requirements = element_tys
                     .iter()
                     .map(|ty| attribute_write_requirement(db, env, *ty, attribute, *receiver));
-                let valid = requirements.by_ref().all(|requirement| {
+                let mut valid = true;
+                for requirement in requirements.by_ref() {
                     let mut current = AttributeDeprecation::Missing;
-                    let valid = self.evaluate(
+                    valid &= self.evaluate(
                         &requirement,
                         false,
                         deprecation.as_ref().map(|_| &mut current),
@@ -310,8 +312,10 @@ impl<'db> AssignmentAttributeWriteEvaluator<'_, 'db, '_, '_> {
                     if let Some(deprecation) = deprecation.as_deref_mut() {
                         *deprecation = deprecation.union(db, current);
                     }
-                    valid
-                });
+                    if !valid && !collects_expected_types {
+                        break;
+                    }
+                }
                 if let Some(deprecation) = deprecation {
                     *deprecation = requirements.fold(*deprecation, |deprecation, requirement| {
                         deprecation.union(
