@@ -7649,7 +7649,33 @@ impl<'db> Type<'db> {
 
             // Keep the argument's full type in `MethodWrapper` instead of inferring one shared
             // ParamSpec and return type, which would lose attributes and overload correlations.
-            KnownClass::Classmethod | KnownClass::Staticmethod => Some(
+            KnownClass::Classmethod => Some(
+                Binding::single(
+                    self,
+                    Signature::new(
+                        Parameters::standard([Parameter::positional_only(Some(Name::new_static(
+                            "f",
+                        )))
+                        .with_annotated_type(Type::single_callable(
+                            db,
+                            Signature::new(
+                                Parameters::concatenate(
+                                    db,
+                                    vec![
+                                        Parameter::positional_only(None)
+                                            .with_annotated_type(Type::any()),
+                                    ],
+                                    ConcatenateTail::Gradual,
+                                ),
+                                Type::object(),
+                            ),
+                        ))]),
+                        Type::unknown(),
+                    ),
+                )
+                .into(),
+            ),
+            KnownClass::Staticmethod => Some(
                 Binding::single(
                     self,
                     Signature::new(

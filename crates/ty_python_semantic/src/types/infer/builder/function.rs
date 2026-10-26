@@ -492,11 +492,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             has_transforming_decorators |= decorator_function_decorator.is_empty();
             decorator_types_and_nodes.push((decorator_type, decorator));
         }
-        if !has_transforming_decorators {
-            // With only known decorators, use the complete overload set's declaration
-            // flags, including its recovery for inconsistently decorated overloads.
-            decorator_types_and_nodes.clear();
-        }
 
         // Check for `@final` applied to non-method functions.
         // `@final` is only meaningful on methods and classes.
@@ -586,6 +581,29 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         if !decorator_list.is_empty() {
             self.undecorated_type = Some(inferred_ty);
         }
+        if !has_transforming_decorators {
+            if parameters.posonlyargs.is_empty()
+                && parameters.args.is_empty()
+                && parameters.vararg.is_none()
+            {
+                let undecorated = FunctionType::new(db, function_literal.without_overloads(), None)
+                    .underlying_function(db);
+                for (decorator_ty, decorator_node) in &decorator_types_and_nodes {
+                    if decorator_ty
+                        .as_class_literal()
+                        .is_some_and(|class| class.is_known(db, KnownClass::Classmethod))
+                    {
+                        self.defer_decorator_call(
+                            decorator_node,
+                            Type::FunctionLiteral(undecorated),
+                        );
+                    }
+                }
+            }
+            // With only known decorators, use the complete overload set's declaration
+            // flags, including its recovery for inconsistently decorated overloads.
+            decorator_types_and_nodes.clear();
+        }
 
         // Check that the function's own type parameters don't shadow
         // type variables from enclosing scopes (by name).
@@ -649,6 +667,17 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     wrap(inferred_ty)
                 };
                 if let Some(wrapped) = wrapped {
+                    if kind == CallableTypeKind::ClassMethodLike
+                        && decorator_ty
+                            .try_call(
+                                db,
+                                self.program_environment(),
+                                &CallArguments::positional([inferred_ty]),
+                            )
+                            .is_err()
+                    {
+                        self.defer_decorator_call(decorator_node, inferred_ty);
+                    }
                     inferred_ty = wrapped;
                     continue;
                 }

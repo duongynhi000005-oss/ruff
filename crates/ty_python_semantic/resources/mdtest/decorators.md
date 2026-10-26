@@ -357,6 +357,44 @@ def bar(): ...
 reveal_type(bar)  # revealed: int
 ```
 
+### `@classmethod` on a function with no positional parameter
+
+`@classmethod` requires a callable that can accept at least one positional argument (`cls`):
+
+```py
+from typing import Callable, TypeVar
+
+T = TypeVar("T")
+
+def identity_decorator(f: T) -> T:
+    return f
+
+class Foo:
+    # error: [invalid-argument-type] "Argument to class `classmethod` is incorrect: Expected `(Any, /, *args: Any, **kwargs: Any) -> object`, found `def no_params() -> None`"
+    @classmethod
+    def no_params() -> None:
+        pass
+
+    # error: [invalid-argument-type] "Argument to class `classmethod` is incorrect: Expected `(Any, /, *args: Any, **kwargs: Any) -> object`, found `def kw_only(*, x: int) -> None`"
+    @classmethod
+    def kw_only(*, x: int) -> None:
+        pass
+
+    # error: [invalid-argument-type] "Argument to class `classmethod` is incorrect: Expected `(Any, /, *args: Any, **kwargs: Any) -> object`, found `def stacked() -> None`"
+    @classmethod
+    @identity_decorator
+    def stacked() -> None:
+        pass
+
+    @classmethod
+    def valid_cls(cls) -> None:
+        pass
+
+    @classmethod
+    def valid_varargs(*args: object) -> None:
+        pass
+```
+
 ### Class, with correct signature, used as a decorator
 
 When a class's constructor accepts the decorated function/class, no error is emitted:
