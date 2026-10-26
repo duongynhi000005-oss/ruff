@@ -1,5 +1,8 @@
+use smallvec::SmallVec;
+
 use super::{
-    Binding, Bindings, CallableBinding, CallableItem, CheckTypesMode, generic_context_has_paramspec,
+    Binding, Bindings, CallableBinding, CallableItem, CheckTypesMode, OverloadEvaluation,
+    generic_context_has_paramspec,
 };
 use crate::Db;
 use crate::ProgramEnvironment;
@@ -275,10 +278,10 @@ impl<'db> ConstructorBinding<'db> {
 
         // If any matching overload returns the constructed instance type itself, or an instance of
         // the constructed class, we need to check downstream constructors.
-        callable.matching_overloads().any(|(_, overload)| {
-            overload.return_ty == constructed_instance_type
+        callable.matching_overload_evaluations().any(|evaluation| {
+            evaluation.return_ty == constructed_instance_type
                 || constructor_class_literal.is_some_and(|class_literal| {
-                    constructor_returns_instance(db, env, class_literal, overload.return_ty)
+                    constructor_returns_instance(db, env, class_literal, evaluation.return_ty)
                 })
         })
     }
@@ -384,8 +387,12 @@ impl<'db> ConstructorBinding<'db> {
             return return_ty;
         }
 
-        constructed_instance_type
-            .apply_optional_specialization(db, self.instance_return_specialization(db, env))
+        self.apply_instance_return_specializations(
+            db,
+            env,
+            constructed_instance_type,
+            &self.instance_return_specializations(db, env),
+        )
     }
 
     fn first_matching_overload(&self) -> Option<&Binding<'db>> {
@@ -395,136 +402,225 @@ impl<'db> ConstructorBinding<'db> {
             .next()
     }
 
-    /// Combine inferred specializations from this constructor and downstream constructors. The
-    /// resulting specialization can be applied either to the constructed instance type or to an
-    /// explicit `__new__` / `__call__` return annotation that is an instance of the constructed
-    /// type or a subclass.
-    fn instance_return_specialization(
+    fn apply_instance_return_specializations(
         &self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
-    ) -> Option<Specialization<'db>> {
+        ty: Type<'db>,
+        specializations: &[Specialization<'db>],
+    ) -> Type<'db> {
+        if specializations.is_empty() {
+            ty
+        } else {
+            UnionType::from_elements(
+                db,
+                env,
+                specializations
+                    .iter()
+                    .map(|&specialization| ty.apply_specialization(db, specialization)),
+            )
+        }
+    }
+
+    /// Combine inferred specializations from this constructor and downstream constructors. The
+    /// resulting specializations can be applied either to the constructed instance type or to an
+    /// explicit `__new__` / `__call__` return annotation that is an instance of the constructed
+    /// type or a subclass.
+    ///
+    /// When overload resolution succeeded via argument type expansion, each expanded argument list
+    /// preserves its own inferred specialization so distinct union branches are not overwritten.
+    fn instance_return_specializations(
+        &self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+    ) -> SmallVec<[Specialization<'db>; 1]> {
         let constructed_instance_type = self.constructed_instance_type();
         // This will be `None` if we're constructing a non-generic class. If we're constructing a
         // non-specialized generic class (`C(...)`), it'll be the identity specialization. If we're
         // constructing an already-specialized generic alias (`C[str](...)`), it'll be the
         // specialization of that alias.
-        let (_, class_specialization) = constructed_instance_type.class_specialization(db, env)?;
+        let Some((_, class_specialization)) =
+            constructed_instance_type.class_specialization(db, env)
+        else {
+            return SmallVec::new();
+        };
         let static_class_literal = self
             .constructed_class_literal(db, env)
             .and_then(ClassLiteral::as_static);
         let class_context = class_specialization.generic_context(db);
+        let num_class_params = class_specialization.types(db).len();
 
-        let mut combined: Option<Vec<Option<Type<'db>>>> = None;
-        let mut combine_binding_types = |binding: &ConstructorBinding<'db>| {
-            let Some(overload) = binding
-                .first_matching_overload()
-                .or_else(|| binding.callable().unambiguous_failing_overload())
-            else {
-                return;
-            };
-            // Parameter checking uses defaults for unsolved variables, but those defaults must
-            // not compete with types inferred by another constructor method. Project missing
-            // class bindings to a marker so we can distinguish them from inferred types, including
-            // an inferred `Unknown`. The overload's instance type contains call-local typevars.
-            let partial_specialization = overload.inference.and_then(|inference| {
-                let (_, class_specialization) = overload
-                    .constructor_context?
-                    .instance_type()
-                    .class_specialization(db, env)?;
-                Some(
-                    inference.merged_specialization_with(db, |typevar, inferred| {
-                        (inferred.is_none()
-                            && class_specialization
-                                .types(db)
-                                .contains(&Type::TypeVar(typevar)))
-                        .then_some(Type::Dynamic(DynamicType::UnspecializedTypeVar))
-                    }),
-                )
-            });
-            // A marker for the entire class argument means there was no inference. Structural
-            // annotations such as `C[list[T]]` still contribute a type; use their resolved form
-            // so nested markers do not escape into the constructed instance.
-            let inferred_types = |partial: Specialization<'db>, resolved: Specialization<'db>| {
-                partial
-                    .types(db)
-                    .iter()
-                    .zip(resolved.types(db))
-                    .map(|(partial, resolved)| {
-                        (*partial != Type::Dynamic(DynamicType::UnspecializedTypeVar))
-                            .then_some(*resolved)
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let project_class_arguments =
-                |ty: Type<'db>, resolved_ty: Type<'db>| -> Option<Vec<Option<Type<'db>>>> {
-                    let class = static_class_literal?;
-                    let partial = ty
-                        .apply_optional_specialization(db, partial_specialization)
-                        .specialization_of(db, env, class)?;
-                    let resolved = resolved_ty.specialization_of(db, env, class)?;
-                    Some(inferred_types(partial, resolved))
-                };
-            let return_types =
-                project_class_arguments(overload.unspecialized_return_type(db), overload.return_ty);
-
-            // TODO All this handling of return-specialization vs self-specialization is a hacky
-            // work-around to a situation that can occur with a case like `def __init__(self:
-            // "Class6[V1, V2]", v1: V1, v2: V2)`, where we don't currently solve across the entire
-            // call, so the self annotation gives us `V1 = T1`, `V2 = T2` (where `T1` and `T2` are
-            // the class typevars), and we consider T1 and T2 as unknowns. This will be fixed when
-            // we start building up constraint sets across the full call. We should be able to just
-            // use the return specialization and eliminate all this.
-            let return_types_are_informative = return_types.as_ref().is_some_and(|types| {
-                types
-                    .iter()
-                    .flatten()
-                    .any(|mapped_ty| !mapped_ty.is_unknown())
-            });
-            let types = if return_types_are_informative {
-                return_types
-            } else {
-                let self_parameter_types = (|| {
-                    let self_param_ty = overload.signature.parameters().get(0)?.annotated_type();
-                    let resolved_self_param_ty = self_param_ty
-                        .apply_optional_specialization(db, overload.merged_specialization(db));
-                    let mut types = project_class_arguments(self_param_ty, resolved_self_param_ty)?;
-                    for mapped_ty in types.iter_mut().flatten() {
-                        let without_unknown =
-                            mapped_ty.filter_union(db, env, |element| !element.is_unknown());
-                        if !without_unknown.is_never() {
-                            *mapped_ty = without_unknown;
-                        }
-                        *mapped_ty = mapped_ty.promote(db, env);
-                    }
-                    Some(types)
-                })();
-                self_parameter_types.or(return_types).or_else(|| {
-                    let resolved = overload.merged_specialization(db)?;
-                    Some(inferred_types(
-                        partial_specialization
-                            .unwrap_or(resolved)
-                            .restrict(db, class_context)?,
-                        resolved.restrict(db, class_context)?,
-                    ))
-                })
-            };
-            // end TODO
-
-            let Some(types) = types else {
-                return;
-            };
-            if let Some(previous) = &mut combined {
-                for (previous, inferred) in previous.iter_mut().zip(types) {
-                    *previous = match (*previous, inferred) {
-                        (Some(previous), Some(inferred)) => {
-                            Some(UnionType::from_two_elements(db, env, previous, inferred))
-                        }
-                        (previous, inferred) => previous.or(inferred),
+        let evaluation_class_types =
+            |evaluation: OverloadEvaluation<'_, 'db>| -> Option<Vec<Option<Type<'db>>>> {
+                let overload = evaluation.overload;
+                // Parameter checking uses defaults for unsolved variables, but those defaults must
+                // not compete with types inferred by another constructor method. Project missing
+                // class bindings to a marker so we can distinguish them from inferred types,
+                // including an inferred `Unknown`. The overload's instance type contains call-local
+                // typevars.
+                let partial_specialization = evaluation.inference.and_then(|inference| {
+                    let (_, class_specialization) = overload
+                        .constructor_context?
+                        .instance_type()
+                        .class_specialization(db, env)?;
+                    Some(
+                        inference.merged_specialization_with(db, |typevar, inferred| {
+                            (inferred.is_none()
+                                && class_specialization
+                                    .types(db)
+                                    .contains(&Type::TypeVar(typevar)))
+                            .then_some(Type::Dynamic(DynamicType::UnspecializedTypeVar))
+                        }),
+                    )
+                });
+                // A marker for the entire class argument means there was no inference. Structural
+                // annotations such as `C[list[T]]` still contribute a type; use their resolved form
+                // so nested markers do not escape into the constructed instance.
+                let inferred_types =
+                    |partial: Specialization<'db>, resolved: Specialization<'db>| {
+                        partial
+                            .types(db)
+                            .iter()
+                            .zip(resolved.types(db))
+                            .map(|(partial, resolved)| {
+                                (*partial != Type::Dynamic(DynamicType::UnspecializedTypeVar))
+                                    .then_some(*resolved)
+                            })
+                            .collect::<Vec<_>>()
                     };
+                let project_class_arguments =
+                    |ty: Type<'db>, resolved_ty: Type<'db>| -> Option<Vec<Option<Type<'db>>>> {
+                        let class = static_class_literal?;
+                        let partial = ty
+                            .apply_optional_specialization(db, partial_specialization)
+                            .specialization_of(db, env, class)?;
+                        let resolved = resolved_ty.specialization_of(db, env, class)?;
+                        Some(inferred_types(partial, resolved))
+                    };
+                let return_types = project_class_arguments(
+                    overload.unspecialized_return_type(db),
+                    evaluation.return_ty,
+                );
+
+                // TODO All this handling of return-specialization vs self-specialization is a hacky
+                // work-around to a situation that can occur with a case like `def __init__(self:
+                // "Class6[V1, V2]", v1: V1, v2: V2)`, where we don't currently solve across the
+                // entire call, so the self annotation gives us `V1 = T1`, `V2 = T2` (where `T1` and
+                // `T2` are the class typevars), and we consider T1 and T2 as unknowns. This will be
+                // fixed when we start building up constraint sets across the full call. We should
+                // be able to just use the return specialization and eliminate all this.
+                let return_types_are_informative = return_types.as_ref().is_some_and(|types| {
+                    types
+                        .iter()
+                        .flatten()
+                        .any(|mapped_ty| !mapped_ty.is_unknown())
+                });
+                if return_types_are_informative {
+                    return_types
+                } else {
+                    let self_parameter_types = (|| {
+                        let self_param_ty =
+                            overload.signature.parameters().get(0)?.annotated_type();
+                        let resolved_self_param_ty = self_param_ty.apply_optional_specialization(
+                            db,
+                            evaluation.merged_specialization(db),
+                        );
+                        let mut types =
+                            project_class_arguments(self_param_ty, resolved_self_param_ty)?;
+                        for mapped_ty in types.iter_mut().flatten() {
+                            let without_unknown =
+                                mapped_ty.filter_union(db, env, |element| !element.is_unknown());
+                            if !without_unknown.is_never() {
+                                *mapped_ty = without_unknown;
+                            }
+                            *mapped_ty = mapped_ty.promote(db, env);
+                        }
+                        Some(types)
+                    })();
+                    self_parameter_types.or(return_types).or_else(|| {
+                        let resolved = evaluation.merged_specialization(db)?;
+                        Some(inferred_types(
+                            partial_specialization
+                                .unwrap_or(resolved)
+                                .restrict(db, class_context)?,
+                            resolved.restrict(db, class_context)?,
+                        ))
+                    })
                 }
+                // end TODO
+            };
+
+        let merge_case_types = |previous: &[Option<Type<'db>>], inferred: &[Option<Type<'db>>]| {
+            previous
+                .iter()
+                .copied()
+                .zip(inferred.iter().copied())
+                .map(|(previous, inferred)| match (previous, inferred) {
+                    (Some(previous), Some(inferred)) => {
+                        Some(UnionType::from_two_elements(db, env, previous, inferred))
+                    }
+                    (previous, inferred) => previous.or(inferred),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut combined_cases: Vec<Vec<Option<Type<'db>>>> = Vec::new();
+        let mut combine_binding_types = |binding: &ConstructorBinding<'db>| {
+            let next_cases: Vec<Vec<Option<Type<'db>>>> =
+                if let Some(cases) = binding.callable().expanded_overload_cases() {
+                    let evaluated: Vec<Option<Vec<Option<Type<'db>>>>> = cases
+                        .iter()
+                        .map(|case| {
+                            binding
+                                .callable()
+                                .case_selected_overload_evaluations(case)
+                                .next()
+                                .and_then(&evaluation_class_types)
+                        })
+                        .collect();
+                    if evaluated.iter().all(Option::is_none) {
+                        Vec::new()
+                    } else {
+                        evaluated
+                            .into_iter()
+                            .map(|types| types.unwrap_or_else(|| vec![None; num_class_params]))
+                            .collect()
+                    }
+                } else {
+                    binding
+                        .first_matching_overload()
+                        .or_else(|| binding.callable().unambiguous_failing_overload())
+                        .map(OverloadEvaluation::from_binding)
+                        .and_then(&evaluation_class_types)
+                        .into_iter()
+                        .collect()
+                };
+
+            if next_cases.is_empty() {
+                return;
+            }
+
+            if combined_cases.is_empty() {
+                combined_cases = next_cases;
+            } else if next_cases.len().is_multiple_of(combined_cases.len()) {
+                let repeat = next_cases.len() / combined_cases.len();
+                combined_cases = next_cases
+                    .iter()
+                    .enumerate()
+                    .map(|(index, next)| merge_case_types(&combined_cases[index / repeat], next))
+                    .collect();
+            } else if combined_cases.len().is_multiple_of(next_cases.len()) {
+                let repeat = combined_cases.len() / next_cases.len();
+                combined_cases = combined_cases
+                    .iter()
+                    .enumerate()
+                    .map(|(index, prev)| merge_case_types(prev, &next_cases[index / repeat]))
+                    .collect();
             } else {
-                combined = Some(types);
+                for next in &next_cases {
+                    combined_cases[0] = merge_case_types(&combined_cases[0], next);
+                }
+                combined_cases.truncate(1);
             }
         };
 
@@ -539,11 +635,14 @@ impl<'db> ConstructorBinding<'db> {
             }
         }
 
-        combined.map(|types| {
-            class_context
-                .specialize_partial(db, types)
-                .apply_optional_specialization(db, Some(class_specialization))
-        })
+        combined_cases
+            .into_iter()
+            .map(|types| {
+                class_context
+                    .specialize_partial(db, types)
+                    .apply_optional_specialization(db, Some(class_specialization))
+            })
+            .collect()
     }
 
     /// Compute the explicit return type from a `__new__` or metaclass `__call__`.
@@ -565,18 +664,59 @@ impl<'db> ConstructorBinding<'db> {
             return None;
         }
 
+        let specializations = self.instance_return_specializations(db, env);
+
+        if let Some(cases) = self.callable().expanded_overload_cases() {
+            let mut case_return_types = SmallVec::<[Type<'db>; 2]>::with_capacity(cases.len());
+            for (case_index, case) in cases.iter().enumerate() {
+                let case_specializations = if specializations.len() >= cases.len()
+                    && specializations.len().is_multiple_of(cases.len())
+                {
+                    let repeat = specializations.len() / cases.len();
+                    &specializations[case_index * repeat..(case_index + 1) * repeat]
+                } else {
+                    &specializations
+                };
+                let case_return = self
+                    .analyze_overload_returns(
+                        db,
+                        env,
+                        self.callable().case_selected_overload_evaluations(case),
+                        case_specializations,
+                    )
+                    .unwrap_or_else(|| {
+                        self.apply_instance_return_specializations(
+                            db,
+                            env,
+                            self.constructed_instance_type(),
+                            case_specializations,
+                        )
+                    });
+                case_return_types.push(case_return);
+            }
+            return Some(UnionType::from_elements(db, env, case_return_types));
+        }
+
         let matching_overloads = self
             .callable()
             .matching_overloads()
-            .map(|(_, overload)| overload);
+            .map(|(_, overload)| OverloadEvaluation::from_binding(overload));
 
         // If we have matching overloads, only those are candidates. If all overloads failed,
         // consider all overloads' return types. (This increases the chances of an `Unknown`
         // return, but still preserves more precise returns in unambiguous cases.)
         if matching_overloads.clone().next().is_none() {
-            self.analyze_overload_returns(db, env, self.callable().overloads().iter())
+            self.analyze_overload_returns(
+                db,
+                env,
+                self.callable()
+                    .overloads()
+                    .iter()
+                    .map(OverloadEvaluation::from_binding),
+                &specializations,
+            )
         } else {
-            self.analyze_overload_returns(db, env, matching_overloads)
+            self.analyze_overload_returns(db, env, matching_overloads, &specializations)
         }
     }
 
@@ -586,7 +726,8 @@ impl<'db> ConstructorBinding<'db> {
         &self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
-        overloads: impl IntoIterator<Item = &'a Binding<'db>>,
+        overloads: impl IntoIterator<Item = OverloadEvaluation<'a, 'db>>,
+        specializations: &[Specialization<'db>],
     ) -> Option<Type<'db>>
     where
         'db: 'a,
@@ -602,7 +743,8 @@ impl<'db> ConstructorBinding<'db> {
         let mut saw_instance_return = false;
         let mut non_instance_return = None;
         for overload in overloads {
-            let (return_ty, is_instance_return) = self.single_overload_return(db, env, overload);
+            let (return_ty, is_instance_return) =
+                self.single_overload_return(db, env, overload, specializations);
             if is_instance_return {
                 if saw_instance_return {
                     sole_instance_return = None;
@@ -638,13 +780,15 @@ impl<'db> ConstructorBinding<'db> {
         &self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
-        overload: &Binding<'db>,
+        evaluation: OverloadEvaluation<'_, 'db>,
+        specializations: &[Specialization<'db>],
     ) -> (Type<'db>, bool) {
+        let overload = evaluation.overload;
         let return_ty = overload
             .unspecialized_return_type(db)
             .apply_optional_specialization(
                 db,
-                overload.merged_specialization(db).map(|specialization| {
+                evaluation.merged_specialization(db).map(|specialization| {
                     self.unspecialize_class_type_variables(db, env, specialization)
                 }),
             );
@@ -655,15 +799,12 @@ impl<'db> ConstructorBinding<'db> {
             })
         {
             return (
-                return_ty.apply_optional_specialization(
-                    db,
-                    self.instance_return_specialization(db, env),
-                ),
+                self.apply_instance_return_specializations(db, env, return_ty, specializations),
                 true,
             );
         }
 
-        (overload.return_ty, false)
+        (evaluation.return_ty, false)
     }
 
     /// "Un-specialize" class-level type variables in an overload specialization.

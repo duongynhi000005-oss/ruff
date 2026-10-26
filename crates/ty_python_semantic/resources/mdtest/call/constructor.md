@@ -2347,3 +2347,65 @@ class RelatedBox(Generic[T]):
     def __init__(self, holder: Holder[T]) -> None:
         self.holder = holder
 ```
+
+## Argument type expansion in overloaded generic constructors
+
+When an overloaded generic constructor is called with a union argument that requires argument type
+expansion, each expanded argument list preserves its own inferred specialization, whether the union
+branches match the same generic overload or different overloads.
+
+```py
+from typing import Generic, Self, TypeVar, overload
+
+T = TypeVar("T", int, str)
+
+class ConstrainedBox(Generic[T]):
+    @overload
+    def __init__(self, value: T) -> None: ...
+    @overload
+    def __init__(self, value: None) -> None: ...
+    def __init__(self, value: object) -> None: ...
+
+def check_same_overload(int_or_str: int | str, str_or_int: str | int) -> None:
+    reveal_type(ConstrainedBox(int_or_str))  # revealed: ConstrainedBox[int] | ConstrainedBox[str]
+    reveal_type(ConstrainedBox(str_or_int))  # revealed: ConstrainedBox[str] | ConstrainedBox[int]
+
+def check_dict_union(mapping: dict[int, int] | list[tuple[str, str]]) -> None:
+    reveal_type(dict(mapping))  # revealed: dict[int, int] | dict[str, str]
+
+U = TypeVar("U")
+
+class MultiOverloadBox(Generic[U]):
+    @overload
+    def __init__(self, items: list[U]) -> None: ...
+    @overload
+    def __init__(self, items: set[U]) -> None: ...
+    def __init__(self, items: object) -> None: ...
+
+def check_different_overloads(items: list[int] | set[str]) -> None:
+    reveal_type(MultiOverloadBox(items))  # revealed: MultiOverloadBox[int] | MultiOverloadBox[str]
+
+class NewAndInitBox(Generic[T]):
+    def __new__(cls, value: object) -> Self:
+        return super().__new__(cls)
+
+    @overload
+    def __init__(self, value: T) -> None: ...
+    @overload
+    def __init__(self, value: None) -> None: ...
+    def __init__(self, value: object) -> None: ...
+
+def check_new_and_init(value: int | str) -> None:
+    reveal_type(NewAndInitBox(value))  # revealed: NewAndInitBox[int] | NewAndInitBox[str]
+
+class OverloadedNewBox(Generic[U]):
+    @overload
+    def __new__(cls, items: list[U]) -> Self: ...
+    @overload
+    def __new__(cls, items: set[U]) -> Self: ...
+    def __new__(cls, items: object) -> Self:
+        return super().__new__(cls)
+
+def check_overloaded_new(items: list[int] | set[str]) -> None:
+    reveal_type(OverloadedNewBox(items))  # revealed: OverloadedNewBox[int] | OverloadedNewBox[str]
+```

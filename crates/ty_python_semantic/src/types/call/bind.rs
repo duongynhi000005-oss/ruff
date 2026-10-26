@@ -4612,6 +4612,46 @@ impl<'db> CallableBinding<'db> {
             .filter(|(_, overload)| !overload.has_errors_affecting_overload_resolution())
     }
 
+    /// Returns the expanded argument-list evaluations when this call resolved via step 3
+    /// argument type expansion.
+    pub(super) fn expanded_overload_cases(&self) -> Option<&[ExpandedCallEvaluation<'db>]> {
+        match &self.overload_call_result {
+            Some(OverloadCallResult::ArgumentTypeExpansion(expanded)) => Some(&expanded.cases),
+            _ => None,
+        }
+    }
+
+    /// Returns the overload evaluations selected for a single expanded argument list.
+    pub(super) fn case_selected_overload_evaluations<'a>(
+        &'a self,
+        case: &'a ExpandedCallEvaluation<'db>,
+    ) -> impl Iterator<Item = OverloadEvaluation<'a, 'db>> + Clone {
+        case.selected_overloads.iter().filter_map(move |&index| {
+            let overload = self.overloads.get(index)?;
+            let snapshot = case.snapshot.binding(index)?;
+            Some(OverloadEvaluation::from_snapshot(overload, snapshot))
+        })
+    }
+
+    /// Returns an iterator over all overload evaluations that matched for this call binding,
+    /// preserving per-case evaluations when argument type expansion occurred.
+    pub(super) fn matching_overload_evaluations(
+        &self,
+    ) -> impl Iterator<Item = OverloadEvaluation<'_, 'db>> + Clone {
+        if let Some(cases) = self.expanded_overload_cases() {
+            Either::Left(
+                cases
+                    .iter()
+                    .flat_map(move |case| self.case_selected_overload_evaluations(case)),
+            )
+        } else {
+            Either::Right(
+                self.matching_overloads()
+                    .map(|(_, overload)| OverloadEvaluation::from_binding(overload)),
+            )
+        }
+    }
+
     /// Returns the overloads selected for deprecation reporting without changing the matches
     /// retained for argument inference. Equivalent return types select the first match;
     /// ambiguous calls retain every match, and argument expansion combines its selected matches.
@@ -4987,10 +5027,42 @@ struct ExpandedOverloadCall<'db> {
 /// The snapshot retains matching candidates; selection records the overloads that determine
 /// this case's result after resolving equivalent return types or ambiguity.
 #[derive(Debug, Clone)]
-struct ExpandedCallEvaluation<'db> {
+pub(super) struct ExpandedCallEvaluation<'db> {
     return_type: Type<'db>,
     selected_overloads: SmallVec<[usize; 2]>,
     snapshot: CallableBindingSnapshot<'db>,
+}
+
+/// A view of a matched overload's state for either a direct evaluation or a single expanded
+/// argument list.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OverloadEvaluation<'a, 'db> {
+    pub(super) overload: &'a Binding<'db>,
+    pub(super) return_ty: Type<'db>,
+    pub(super) inference: Option<TypeVarInference<'db>>,
+}
+
+impl<'a, 'db> OverloadEvaluation<'a, 'db> {
+    pub(super) fn from_binding(overload: &'a Binding<'db>) -> Self {
+        Self {
+            overload,
+            return_ty: overload.return_ty,
+            inference: overload.inference,
+        }
+    }
+
+    fn from_snapshot(overload: &'a Binding<'db>, snapshot: &BindingSnapshot<'db>) -> Self {
+        Self {
+            overload,
+            return_ty: snapshot.return_ty,
+            inference: snapshot.inference,
+        }
+    }
+
+    pub(super) fn merged_specialization(self, db: &'db dyn Db) -> Option<Specialization<'db>> {
+        self.inference
+            .map(|inference| inference.merged_specialization(db))
+    }
 }
 
 #[derive(Debug)]
@@ -9178,7 +9250,13 @@ struct CallableBindingSnapshot<'db> {
     matching_overloads: Vec<(usize, BindingSnapshot<'db>)>,
 }
 
-impl CallableBindingSnapshot<'_> {
+impl<'db> CallableBindingSnapshot<'db> {
+    fn binding(&self, target_index: usize) -> Option<&BindingSnapshot<'db>> {
+        self.matching_overloads
+            .iter()
+            .find_map(|(index, snapshot)| (*index == target_index).then_some(snapshot))
+    }
+
     /// Merge another expanded argument list's bindings into this snapshot. Both snapshots must
     /// originate from the same snapshotter, so their overload indexes have the same order.
     fn update(&mut self, other: &Self) {
