@@ -77,6 +77,57 @@ def delete_nonlocal():
         del e
 ```
 
+## Deferred reads of deleted enclosing names
+
+A deferred read in a nested function that can encounter a deleted module-global or enclosing
+binding is reported as possibly unresolved, while a deferred read of an enclosing name that
+remains bound is accepted without a deletion diagnostic:
+
+```py
+value = 1
+del value
+
+def read_deleted_global_before() -> int:
+    # error: [possibly-unresolved-reference] "Name `value` used when possibly not defined"
+    return value
+
+read_deleted_global_before()
+
+deleted_later = 1
+
+def read_deleted_global_after() -> int:
+    # error: [possibly-unresolved-reference] "Name `deleted_later` used when possibly not defined"
+    return deleted_later
+
+del deleted_later
+read_deleted_global_after()
+
+kept = 1
+
+def read_kept_global() -> int:
+    return kept
+
+read_kept_global()
+
+def enclosing_deleted_after() -> int:
+    local_val = 1
+
+    def read() -> int:
+        # error: [possibly-unresolved-reference] "Name `local_val` used when possibly not defined"
+        return local_val
+
+    del local_val
+    return read()
+
+def enclosing_kept() -> int:
+    local_val = 1
+
+    def read() -> int:
+        return local_val
+
+    return read()
+```
+
 ## `del` forces local resolution even if it's unreachable
 
 Without a `global x` or `nonlocal x` declaration in `foo`, `del x` in `foo` causes `print(x)` in an

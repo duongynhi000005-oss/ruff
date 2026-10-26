@@ -2771,6 +2771,18 @@ impl<'db> UseDefMapBuilder<'db> {
             PreviousDefinitions::AreShadowed,
             FutureDefinitions::ShadowThisOne,
         );
+        let definitions = match place {
+            ScopedPlaceId::Symbol(symbol) => &mut self.reachable_symbol_definitions[symbol],
+            ScopedPlaceId::Member(member) => &mut self.reachable_member_definitions[member],
+        };
+        definitions.bindings.record_binding(
+            def_id,
+            self.reachability,
+            self.is_class_scope,
+            place.is_symbol(),
+            PreviousDefinitions::AreKept,
+            FutureDefinitions::ShadowThisOne,
+        );
     }
 
     pub(super) fn record_use(&mut self, place: ScopedPlaceId, use_id: ScopedUseId) {

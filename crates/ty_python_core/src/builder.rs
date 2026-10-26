@@ -5475,8 +5475,15 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                         }
 
                         let place_id = self.add_place(target);
-                        self.invalidate_narrowing_aliases_for(place_id);
-                        self.delete_binding(place_id);
+                        if let Some(symbol_id) = place_id.as_symbol() {
+                            self.mark_place_bound(place_id);
+                            self.invalidate_narrowing_aliases_for(place_id);
+                            self.delete_binding(place_id);
+                            self.update_lazy_snapshots(symbol_id);
+                        } else {
+                            self.invalidate_narrowing_aliases_for(place_id);
+                            self.delete_binding(place_id);
+                        }
                     }
                 }
             }
