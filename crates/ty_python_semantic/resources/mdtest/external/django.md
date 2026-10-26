@@ -211,6 +211,55 @@ def _(book: Book, ebook: Ebook):
     reveal_type(ebook.id)  # revealed: str
 ```
 
+### Abstract mixin models
+
+An abstract model without an explicit primary key does not synthesize an automatic integer `id`
+field of its own, so placing an abstract mixin before another base model that declares a primary
+key does not shadow that base model's `id` or `pk`:
+
+```py
+from django.db import models
+
+class UUIDBase(models.Model):
+    id = models.UUIDField(primary_key=True)
+
+    class Meta:
+        abstract = True
+
+class ISBNBase(models.Model):
+    isbn = models.CharField(max_length=13, primary_key=True)
+
+    class Meta:
+        abstract = True
+
+class Mixin(models.Model):
+    class Meta:
+        abstract = True
+
+class A(Mixin, UUIDBase):
+    pass
+
+class B(UUIDBase, Mixin):
+    pass
+
+class C(Mixin, ISBNBase):
+    pass
+
+class D(Mixin):
+    pass
+
+def _(a: A, b: B, c: C, d: D):
+    reveal_type(a.pk)  # revealed: UUID
+    reveal_type(a.id)  # revealed: UUID
+    reveal_type(b.pk)  # revealed: UUID
+    reveal_type(b.id)  # revealed: UUID
+    reveal_type(c.pk)  # revealed: str
+    reveal_type(c.isbn)  # revealed: str
+    c.id  # error: [unresolved-attribute]
+    reveal_type(d.pk)  # revealed: int
+    reveal_type(d.id)  # revealed: int
+```
+
 ## Foreign key IDs
 
 ### Automatic primary key

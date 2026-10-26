@@ -9,9 +9,9 @@ use ty_python_core::{
 use crate::place::known_module_symbol;
 use crate::types::member::class_member;
 use crate::types::{
-    BindingContext, BoundTypeVarInstance, ClassBase, GenericContext, KnownClass, Parameter,
-    Parameters, SelfTypeVarOrigin, Signature, Specialization, StaticClassLiteral, Type, UnionType,
-    binding_type, definition_expression_type,
+    BindingContext, BoundTypeVarInstance, ClassBase, ClassLiteral, GenericContext, KnownClass,
+    Parameter, Parameters, SelfTypeVarOrigin, Signature, Specialization, StaticClassLiteral, Type,
+    UnionType, binding_type, definition_expression_type,
 };
 use crate::{Db, ProgramEnvironment};
 
@@ -22,6 +22,20 @@ fn is_model<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
         .skip(1)
         .filter_map(ClassBase::into_class)
         .any(|base| base.is_known(db, KnownClass::DjangoModel))
+}
+
+/// Returns whether `class` is an abstract Django model (`class Meta: abstract = True`).
+fn is_abstract_model<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
+    let Some(meta) = class_member(db, class.body_scope(db), "Meta")
+        .ignore_possibly_undefined()
+        .and_then(Type::as_class_literal)
+        .and_then(ClassLiteral::as_static)
+    else {
+        return false;
+    };
+
+    class_member(db, meta.body_scope(db), "abstract").ignore_possibly_undefined()
+        == Some(Type::bool_literal(true))
 }
 
 /// The type of a Django model field, and metadata extracted from the field construction.
@@ -224,6 +238,10 @@ fn primary_key_member<'db>(
         if let Some(field) = own_primary_key(db, base) {
             return (name == "pk").then(|| field.apply_optional_specialization(db, specialization));
         }
+    }
+
+    if is_abstract_model(db, class) {
+        return None;
     }
 
     known_module_symbol(db, env, KnownModule::DjangoDbModelsFields, "AutoField")
