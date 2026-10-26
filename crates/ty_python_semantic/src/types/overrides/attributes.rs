@@ -433,6 +433,11 @@ fn attribute_violation<'db>(
         });
     }
     let write = target.write?;
+    // A method overriding a non-ClassVar callable attribute implements the callable contract
+    // without defining a mutable instance variable. Only the read type needs to be preserved.
+    if source.is_method && !target.qualifiers.contains(TypeQualifiers::CLASS_VAR) {
+        return None;
+    }
     // A neutral dataclass-transform base explicitly permits frozen subclasses. Its
     // fields can become read-only there, even though writes to the base are allowed.
     // Preserve this permission when that frozen field is inherited by another subclass.

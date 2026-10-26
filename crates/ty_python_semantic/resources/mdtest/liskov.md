@@ -796,6 +796,31 @@ class PropertySubclass(PropertyBase):
         return 1
 ```
 
+Overriding a non-`ClassVar` callable attribute (such as PyTorch's `Module.forward: Callable[..., Any]`)
+with an instance method is checked for callable signature compatibility rather than mutable attribute invariance:
+
+```py
+from collections.abc import Callable
+from typing import Any
+
+def _forward_unimplemented(self, *input: Any) -> None: ...
+
+class Module:
+    forward: Callable[..., Any] = _forward_unimplemented
+
+class SimpleModel(Module):
+    def forward(self, x: int) -> int:
+        return x
+
+class BaseCallableAttr:
+    f: Callable[[int], str]
+
+class IncompatibleMethodSubclass(BaseCallableAttr):
+    # error: [invalid-attribute-override]
+    def f(self, x: str) -> str:
+        return x
+```
+
 ### Repeated inherited conflicts
 
 If a parent class already made an invalid change from class variable to instance variable, a child
