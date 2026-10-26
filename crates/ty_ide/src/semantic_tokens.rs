@@ -500,6 +500,46 @@ impl<'db> SemanticTokenVisitor<'db> {
         }
     }
 
+    fn classify_imported_symbol_from_resolved_definitions(
+        &self,
+        definitions: &[ResolvedDefinition<'db>],
+    ) -> Option<(SemanticTokenType, SemanticTokenModifier)> {
+        if let Some(classification) =
+            self.classify_type_alias_from_resolved_definitions(definitions)
+        {
+            return Some(classification);
+        }
+
+        if definitions.is_empty() {
+            return None;
+        }
+
+        let db = self.model.db();
+
+        if definitions.iter().all(|resolved| {
+            resolved.definition().is_some_and(|definition| {
+                matches!(definition.kind(db), DefinitionKind::Function(_))
+            })
+        }) {
+            let token_type = if self.in_class_scope {
+                SemanticTokenType::Method
+            } else {
+                SemanticTokenType::Function
+            };
+            return Some((token_type, SemanticTokenModifier::empty()));
+        }
+
+        if definitions.iter().all(|resolved| {
+            resolved
+                .definition()
+                .is_some_and(|definition| matches!(definition.kind(db), DefinitionKind::Class(_)))
+        }) {
+            return Some((SemanticTokenType::Class, SemanticTokenModifier::empty()));
+        }
+
+        None
+    }
+
     fn classify_type_alias_from_resolved_definitions(
         &self,
         definitions: &[ResolvedDefinition<'db>],
@@ -542,6 +582,13 @@ impl<'db> SemanticTokenVisitor<'db> {
             }
             Type::FunctionLiteral(_) => {
                 // Check if this is a method based on current scope
+                if self.in_class_scope {
+                    (SemanticTokenType::Method, modifiers)
+                } else {
+                    (SemanticTokenType::Function, modifiers)
+                }
+            }
+            Type::Callable(callable) if callable.is_function_like(self.model.db()) => {
                 if self.in_class_scope {
                     (SemanticTokenType::Method, modifiers)
                 } else {
@@ -942,7 +989,7 @@ impl SourceOrderVisitor<'_> for SemanticTokenVisitor<'_> {
                 }
                 for alias in &import.names {
                     let classification = self
-                        .classify_type_alias_from_resolved_definitions(
+                        .classify_imported_symbol_from_resolved_definitions(
                             &definitions_for_imported_symbol(
                                 self.model,
                                 import,
@@ -4950,6 +4997,72 @@ from collections.abc import Set as AbstractSet
         "abc" @ 48..51: Namespace
         "Set" @ 59..62: Class
         "AbstractSet" @ 66..77: Class
+        "#);
+    }
+
+    #[test]
+    fn imported_decorated_functions_classified_consistently() {
+        let mut test = SemanticTokenTest::new(
+            r#"
+from foo import add, addtwo, subtwo, multwo
+from foo import addtwo as addtwo_alias
+
+add
+addtwo
+addtwo(5)
+subtwo(5)
+multwo(5)
+"#,
+        );
+        test.db
+            .write_file(
+                SystemPath::new("src/foo.py"),
+                r#"
+from collections.abc import Callable
+from functools import wraps
+
+def unannotated(f):
+    return f
+
+def typed[**P, R](f: Callable[P, R]) -> Callable[P, R]:
+    return f
+
+def add(a, b):
+    return a + b
+
+@wraps(add)
+def addtwo(a):
+    return add(a, 2)
+
+@unannotated
+def subtwo(a):
+    return a - 2
+
+@typed
+def multwo(a: int) -> int:
+    return a * 2
+"#,
+            )
+            .expect("writing to the memory file system should succeed");
+
+        let tokens = test.highlight_file();
+        assert_snapshot!(test.to_snapshot(&tokens), @r#"
+        "foo" @ 6..9: Namespace
+        "add" @ 17..20: Function
+        "addtwo" @ 22..28: Function
+        "subtwo" @ 30..36: Function
+        "multwo" @ 38..44: Function
+        "foo" @ 50..53: Namespace
+        "addtwo" @ 61..67: Function
+        "addtwo_alias" @ 71..83: Function
+        "add" @ 85..88: Function
+        "addtwo" @ 89..95: Function
+        "addtwo" @ 96..102: Function
+        "5" @ 103..104: Number
+        "subtwo" @ 106..112: Function
+        "5" @ 113..114: Number
+        "multwo" @ 116..122: Function
+        "5" @ 123..124: Number
         "#);
     }
 

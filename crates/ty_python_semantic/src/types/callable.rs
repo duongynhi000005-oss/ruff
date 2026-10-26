@@ -823,7 +823,8 @@ impl<'db> CallableType<'db> {
         Self::single(db, Signature::new(Parameters::top(), Type::object()))
     }
 
-    pub(crate) fn is_function_like(self, db: &'db dyn Db) -> bool {
+    /// Returns `true` if this callable represents a function definition.
+    pub fn is_function_like(self, db: &'db dyn Db) -> bool {
         matches!(self.kind(db), CallableTypeKind::FunctionLike)
     }
 
